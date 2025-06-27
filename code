@@ -1,0 +1,145 @@
+# Veri yükleme ve temel işlemler için gerekli kütüphaneler
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+
+# Aykırı değer analizi fonksiyonu
+
+def detect_outliers_iqr(data):
+    Q1 = data.quantile(0.25)
+    Q3 = data.quantile(0.75)
+    IQR = Q3 - Q1
+    outliers = ((data < (Q1 - 1.5 * IQR)) | (data > (Q3 + 1.5 * IQR)))
+    return outliers
+
+# 1) VERİYÜKLEME
+column_names = ['label'] + [f'feature{i}' for i in range(1, 29)]
+df = pd.read_csv("HIGGS.csv", nrows=100000, header=None, names=column_names)
+
+# 2) AYKIRI DEĞER DÜZENLEME
+numeric_cols = df.select_dtypes(include=np.number).columns
+for col in numeric_cols:
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
+    df[col] = np.where(df[col] < lower, lower, df[col])
+    df[col] = np.where(df[col] > upper, upper, df[col])
+
+# 3) ÖLÇEKLEME
+scaler = MinMaxScaler()
+df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns)
+
+# 4) ÖZELLİK SEÇİMİ (Mutual Information)
+from sklearn.feature_selection import SelectKBest, mutual_info_classif
+X = df_scaled.drop(columns=['label'])
+y = df_scaled['label']
+selector_mi = SelectKBest(score_func=mutual_info_classif, k=15)
+X_selected = pd.DataFrame(selector_mi.fit_transform(X, y), columns=X.columns[selector_mi.get_support()])
+
+# 5) MODELLEME (Nested Cross-Validation)
+from sklearn.model_selection import StratifiedKFold
+outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+# KNN Modeli
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, RocCurveDisplay
+outer_results_knn = []
+for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_selected, y), 1):
+    X_train, X_test = X_selected.iloc[train_idx], X_selected.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    clf = GridSearchCV(KNeighborsClassifier(), {'n_neighbors': [3, 5, 7, 9, 11]}, cv=inner_cv, scoring='accuracy')
+    clf.fit(X_train, y_train)
+    model = clf.best_estimator_
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    outer_results_knn.append({
+        'Fold': fold,
+        'Accuracy': accuracy_score(y_test, y_pred),
+        'Precision': precision_score(y_test, y_pred),
+        'Recall': recall_score(y_test, y_pred),
+        'F1': f1_score(y_test, y_pred),
+        'ROC-AUC': roc_auc_score(y_test, y_proba)
+    })
+    RocCurveDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"KNN ROC Curve - Fold {fold}")
+    plt.show()
+
+# SVM Modeli
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+pipeline = Pipeline([('scaler', StandardScaler()), ('svm', SVC(probability=True))])
+param_grid_svm = {'svm__C': [0.1], 'svm__kernel': ['linear']}
+outer_results_svm = []
+for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_selected, y), 1):
+    X_train, X_test = X_selected.iloc[train_idx], X_selected.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    clf = GridSearchCV(pipeline, param_grid=param_grid_svm, cv=inner_cv, scoring='accuracy')
+    clf.fit(X_train, y_train)
+    model = clf.best_estimator_
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    outer_results_svm.append({
+        'Fold': fold,
+        'Accuracy': accuracy_score(y_test, y_pred),
+        'Precision': precision_score(y_test, y_pred),
+        'Recall': recall_score(y_test, y_pred),
+        'F1': f1_score(y_test, y_pred),
+        'ROC-AUC': roc_auc_score(y_test, y_proba)
+    })
+    RocCurveDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"SVM ROC Curve - Fold {fold}")
+    plt.show()
+
+# MLP Modeli
+outer_results_mlp = []
+from sklearn.neural_network import MLPClassifier
+param_grid_mlp = {'hidden_layer_sizes': [(50,), (100,)], 'activation': ['relu', 'tanh']}
+for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_selected, y), 1):
+    X_train, X_test = X_selected.iloc[train_idx], X_selected.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    clf = GridSearchCV(MLPClassifier(max_iter=1000, random_state=42), param_grid=param_grid_mlp, cv=inner_cv, scoring='accuracy')
+    clf.fit(X_train, y_train)
+    model = clf.best_estimator_
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    outer_results_mlp.append({
+        'Fold': fold,
+        'Accuracy': accuracy_score(y_test, y_pred),
+        'Precision': precision_score(y_test, y_pred),
+        'Recall': recall_score(y_test, y_pred),
+        'F1': f1_score(y_test, y_pred),
+        'ROC-AUC': roc_auc_score(y_test, y_proba)
+    })
+    RocCurveDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"MLP ROC Curve - Fold {fold}")
+    plt.show()
+
+# XGBoost Modeli
+from xgboost import XGBClassifier
+param_grid_xgb = {'n_estimators': [100], 'max_depth': [3, 5], 'learning_rate': [0.05, 0.1]}
+outer_results_xgb = []
+for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X_selected, y), 1):
+    X_train, X_test = X_selected.iloc[train_idx], X_selected.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    clf = GridSearchCV(XGBClassifier(eval_metric='logloss', random_state=42), param_grid=param_grid_xgb, cv=inner_cv, scoring='accuracy')
+    clf.fit(X_train, y_train)
+    model = clf.best_estimator_
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    outer_results_xgb.append({
+        'Fold': fold,
+        'Accuracy': accuracy_score(y_test, y_pred),
+        'Precision': precision_score(y_test, y_pred),
+        'Recall': recall_score(y_test, y_pred),
+        'F1': f1_score(y_test, y_pred),
+        'ROC-AUC': roc_auc_score(y_test, y_proba)
+    })
+    RocCurveDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"XGBoost ROC Curve - Fold {fold}")
+    plt.show()
